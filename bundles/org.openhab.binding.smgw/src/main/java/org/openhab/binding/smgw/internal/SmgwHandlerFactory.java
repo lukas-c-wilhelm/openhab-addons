@@ -27,12 +27,10 @@ import org.openhab.core.thing.ThingTypeUID;
 import org.openhab.core.thing.binding.BaseThingHandlerFactory;
 import org.openhab.core.thing.binding.ThingHandler;
 import org.openhab.core.thing.binding.ThingHandlerFactory;
+import org.openhab.core.thing.util.ThingWebClientUtil;
 import org.osgi.service.component.annotations.Activate;
 import org.osgi.service.component.annotations.Component;
-import org.osgi.service.component.annotations.Deactivate;
 import org.osgi.service.component.annotations.Reference;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * The {@link SmgwHandlerFactory} is responsible for creating things and thing
@@ -44,31 +42,13 @@ import org.slf4j.LoggerFactory;
 @Component(service = ThingHandlerFactory.class)
 public class SmgwHandlerFactory extends BaseThingHandlerFactory {
     private static final Set<ThingTypeUID> SUPPORTED_THING_TYPES_UIDS = Set.of(THING_TYPE_SMGW);
-    private final Logger logger = LoggerFactory.getLogger(SmgwHandlerFactory.class);
-
-    private final HttpClient httpClient;
+    private final HttpClientFactory clientFactory;
     private final CronScheduler cronScheduler;
 
     @Activate
     public SmgwHandlerFactory(@Reference HttpClientFactory clientFactory, @Reference CronScheduler cronScheduler) {
         this.cronScheduler = cronScheduler;
-        this.httpClient = clientFactory.createHttpClient("smgw", new SslContextFactory.Client(true));
-        try {
-            this.httpClient.start();
-        } catch (Exception e) {
-            // catching exception is necessary due to the signature of HttpClient.start()
-            logger.warn("Failed to start http client: {}", e.getMessage());
-            throw new IllegalStateException("Could not create HttpClient");
-        }
-    }
-
-    @Deactivate
-    public void deactivate() {
-        try {
-            httpClient.stop();
-        } catch (Exception e) {
-            logger.warn("Failed to stop http client: {}", e.getMessage());
-        }
+        this.clientFactory = clientFactory;
     }
 
     @Override
@@ -81,7 +61,17 @@ public class SmgwHandlerFactory extends BaseThingHandlerFactory {
         ThingTypeUID thingTypeUID = thing.getThingTypeUID();
 
         if (THING_TYPE_SMGW.equals(thingTypeUID)) {
-            return new SmgwHandler(thing, httpClient, cronScheduler);
+            HttpClient client = clientFactory.createHttpClient(
+                    ThingWebClientUtil.buildWebClientConsumerName(thing.getUID(), null),
+                    new SslContextFactory.Client(true));
+            try {
+                client.start();
+            } catch (Exception e) {
+                // catching exception is necessary due to the signature of HttpClient.start()
+                logger.warn("Failed to start http client: {}", e.getMessage());
+                throw new IllegalStateException("Could not create HttpClient");
+            }
+            return new SmgwHandler(thing, client, cronScheduler);
         }
 
         return null;
