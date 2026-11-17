@@ -59,6 +59,9 @@ import org.openhab.binding.shelly.internal.api2.Shelly2ApiJsonDTO.Shelly2DeviceS
 import org.openhab.binding.shelly.internal.api2.Shelly2ApiJsonDTO.Shelly2DeviceStatusLora;
 import org.openhab.binding.shelly.internal.handler.LightModelAccessor.LightModels;
 import org.openhab.binding.shelly.internal.handler.ShellyLightModel.Mode;
+import org.openhab.binding.shelly.internal.handler.component.ShellyComponentBattery;
+import org.openhab.binding.shelly.internal.handler.component.ShellyComponentMedia;
+import org.openhab.binding.shelly.internal.handler.component.ShellyComponentThermostat;
 import org.openhab.binding.shelly.internal.provider.ShellyChannelDefinitions;
 import org.openhab.core.library.types.OnOffType;
 import org.openhab.core.library.types.StringType;
@@ -102,6 +105,9 @@ public class ShellyComponents {
             thingHandler.updateThingChannels(Map.of(),
                     ShellyChannelDefinitions.createLoraChannels(thingHandler.getThing(), profile));
             reconcileLoraChannels(thingHandler, profile);
+
+            updateDeviceUtilization(thingHandler, status);
+            updateRestartRequired(thingHandler, status);
         }
 
         thingHandler.updateChannel(CHANNEL_GROUP_DEV_STATUS, CHANNEL_DEVST_FIRMWARE, getStringType(profile.fwVersion));
@@ -112,6 +118,7 @@ public class ShellyComponents {
             thingHandler.updateChannel(CHANNEL_GROUP_DEV_STATUS, CHANNEL_DEVST_UPTIME,
                     toQuantityType((double) getLong(status.uptime), DIGITS_NONE, Units.SECOND));
         }
+        updateWakeupPeriod(thingHandler);
 
         Integer rssi = getInteger(status.wifiSta.rssi);
         thingHandler.updateChannel(CHANNEL_GROUP_DEV_STATUS, CHANNEL_DEVST_RSSI, mapSignalStrength(rssi));
@@ -133,8 +140,85 @@ public class ShellyComponents {
             thingHandler.updateChannel(CHANNEL_GROUP_DEV_STATUS, CHANNEL_DEVST_CALIBRATED,
                     getOnOff(profile.settings.calibrated));
         }
+        ShellyComponentThermostat.updateChannels(thingHandler, status);
+        ShellyComponentMedia.updateChannels(thingHandler, status);
 
         return false; // device status never triggers update
+    }
+
+    public static void updateWakeupPeriod(ShellyThingInterface thingHandler) {
+        int wakeupPeriod = thingHandler.getProfile().wakeupPeriod;
+        thingHandler.updateChannel(CHANNEL_GROUP_DEV_STATUS, CHANNEL_DEVST_WAKEUP_PERIOD,
+                wakeupPeriod > 0 ? toQuantityType((double) wakeupPeriod, DIGITS_NONE, Units.SECOND) : UnDefType.UNDEF);
+    }
+
+    /**
+     * Publish the utilization values reported by the device (Gen2+ only). Called from the status poll and for
+     * NotifyFullStatus pushes, because a sleeping device can't be polled.
+     *
+     * @param thingHandler Thing Handler instance
+     * @param status Status message
+     */
+    public static void updateDeviceUtilization(ShellyThingInterface thingHandler, ShellySettingsStatus status) {
+        if (status.ramTotal == null) {
+            return; // not reported yet, the device provides all utilization values together
+        }
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_TOTALMEM,
+                toQuantityType(status.ramTotal.doubleValue(), Units.BYTE));
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_FREEMEM,
+                toQuantityType(status.ramFree.doubleValue(), Units.BYTE));
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_TOTALFS,
+                toQuantityType(status.fsSize.doubleValue(), Units.BYTE));
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_FREEFS,
+                toQuantityType(status.fsFree.doubleValue(), Units.BYTE));
+    }
+
+    /**
+     * Publish the restart-required flag of the device (Gen2+ only). A NotifyStatus delta can report it on its own, so
+     * it is handled independently of the utilization values.
+     *
+     * @param thingHandler Thing Handler instance
+     * @param status Status message
+     */
+    public static void updateRestartRequired(ShellyThingInterface thingHandler, ShellySettingsStatus status) {
+        if (status.restartRequired != null) {
+            thingHandler.updateChannel(CHANNEL_GROUP_DEV_STATUS, CHANNEL_DEVST_RESTARTREQ,
+                    getOnOff(status.restartRequired));
+        }
+    }
+
+    /**
+     * Publish the binding-computed health diagnostics (Gen2+ only): restart/error counters, the last alarm and the
+     * maximum internal temperature measured since the Thing was initialized.
+     *
+     * @param thingHandler Thing Handler instance
+     * @param stats the handler's running statistics
+     */
+    public static void updateDiagnosticsStats(ShellyThingInterface thingHandler, ShellyDeviceStats stats) {
+        ShellyDeviceProfile profile = thingHandler.getProfile();
+        if (!profile.isGen2 || profile.isBlu) {
+            return;
+        }
+
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_RESTARTS, getDecimal(stats.restarts.get()));
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_TIMEOUTERRORS,
+                getDecimal(stats.timeoutErrors.get()));
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_ALARMS, getDecimal(stats.alarms.get()));
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_PROTOCOLERRORS,
+                getDecimal(stats.protocolErrors.get()));
+
+        // Resetting stats doesn't reset linked Item states, so unset values have to be published as UNDEF
+        ShellyDeviceStats.ShellyDeviceAlarm lastAlarm = stats.lastAlarm.get();
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_LASTALARM,
+                lastAlarm != null
+                        ? getStringType(lastAlarm.message() + " (" + convertTimestamp(lastAlarm.timeStamp()) + ")")
+                        : UnDefType.UNDEF);
+
+        int maxTemp = stats.maxInternalTemp.get();
+        thingHandler.updateChannel(CHANNEL_GROUP_DIAG, CHANNEL_DIAG_MAXITEMP,
+                maxTemp != ShellyDeviceStats.MAX_INTERNAL_TEMP_UNSET
+                        ? toQuantityType((double) maxTemp, DIGITS_TEMP, SIUnits.CELSIUS)
+                        : UnDefType.UNDEF);
     }
 
     public static boolean updateRelay(ShellyBaseHandler thingHandler, ShellySettingsStatus status, int id) {
@@ -810,23 +894,11 @@ public class ShellyComponents {
                 updated |= thingHandler.updateChannel(CHANNEL_GROUP_BATTERY, CHANNEL_SENSOR_CAPACITOR_VOLTAGE,
                         toQuantityType(getDouble(sdata.capacitorVoltage), DIGITS_VOLT_PRECISE, Units.VOLT));
             }
-            if (sdata.bat != null) { // no update for Sense
-                if (sdata.bat.value != null) {
-                    updated |= thingHandler.updateChannel(CHANNEL_GROUP_BATTERY, CHANNEL_SENSOR_BAT_LEVEL,
-                            toQuantityType(getDouble(sdata.bat.value), 0, Units.PERCENT));
-                }
-
-                int lowBattery = thingHandler.getThingConfig().getLowBattery();
-                Boolean batteryLowFlag = sdata.bat.batteryLow;
-                boolean isLow = batteryLowFlag != null ? batteryLowFlag.booleanValue()
-                        : (sdata.bat.value != null && !charger && getDouble(sdata.bat.value) < lowBattery);
-                boolean changed = thingHandler.updateChannel(CHANNEL_GROUP_BATTERY, CHANNEL_SENSOR_BAT_LOW,
-                        getOnOff(isLow));
-                updated |= changed;
-                if (changed && isLow) {
-                    thingHandler.postEvent(ALARM_TYPE_LOW_BATTERY, false);
-                }
+            ShellyStatusSensor.ShellySensorBat bat = sdata.bat;
+            if (bat != null) { // no update for Sense
+                updated |= ShellyComponentBattery.updateChannels(thingHandler, CHANNEL_GROUP_BATTERY, bat, charger);
             }
+            updated |= ShellyComponentBattery.updateExtChannels(thingHandler, sdata);
 
             if (sdata.motion != null) { // Shelly Sense
                 updated |= thingHandler.updateChannel(CHANNEL_GROUP_SENSOR, CHANNEL_SENSOR_MOTION,

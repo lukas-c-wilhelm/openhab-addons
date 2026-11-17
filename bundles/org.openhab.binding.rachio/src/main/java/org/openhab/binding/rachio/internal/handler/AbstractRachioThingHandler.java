@@ -48,6 +48,7 @@ import org.slf4j.LoggerFactory;
  *
  * @author Jeff James - Initial contribution
  * @author Kovacs Istvan - Adaptation and integration into the openHAB 5.1+ Rachio binding
+ * @author Kovacs Istvan - Atomic lifecycle state publication
  */
 @NonNullByDefault
 public abstract class AbstractRachioThingHandler extends BaseThingHandler implements RachioStatusListener {
@@ -136,6 +137,17 @@ public abstract class AbstractRachioThingHandler extends BaseThingHandler implem
     protected boolean isHandlerLifecycleCurrent(long generation) {
         synchronized (lifecycleLock) {
             return !lifecycleDisposed && lifecycleGeneration == generation;
+        }
+    }
+
+    /** Applies a short state publication atomically with handler lifecycle changes. */
+    protected boolean publishIfHandlerLifecycleCurrent(long generation, Runnable publisher) {
+        synchronized (lifecycleLock) {
+            if (lifecycleDisposed || lifecycleGeneration != generation) {
+                return false;
+            }
+            publisher.run();
+            return true;
         }
     }
 
@@ -307,7 +319,7 @@ public abstract class AbstractRachioThingHandler extends BaseThingHandler implem
                     retryAction.run();
                 }
             }, delaySeconds, TimeUnit.SECONDS);
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                     i18nText("thing-status.rachio.thing.local-throttle", operation, delaySeconds));
             return delaySeconds;
         }
@@ -334,8 +346,7 @@ public abstract class AbstractRachioThingHandler extends BaseThingHandler implem
                     retryAction.run();
                 }
             }, delaySeconds, TimeUnit.SECONDS);
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
-                    INITIALIZATION_THROTTLE_STATUS_MESSAGE);
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR, INITIALIZATION_THROTTLE_STATUS_MESSAGE);
             return delaySeconds;
         }
     }
@@ -369,12 +380,12 @@ public abstract class AbstractRachioThingHandler extends BaseThingHandler implem
                     scheduleHandlerTask(generation, this::onBridgeOnline);
                 }
             } else {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
+                updateStatus(ThingStatusDetail.BRIDGE_OFFLINE);
             }
         } else {
             cancelHandlerLifecycleTasks(false);
             cancelLocalThrottleRetry();
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
+            updateStatus(ThingStatusDetail.BRIDGE_OFFLINE);
         }
     }
 

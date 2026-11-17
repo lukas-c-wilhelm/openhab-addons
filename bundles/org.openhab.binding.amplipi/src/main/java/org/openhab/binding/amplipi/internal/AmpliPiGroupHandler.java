@@ -57,7 +57,7 @@ public class AmpliPiGroupHandler extends BaseThingHandler implements AmpliPiStat
     private final HttpClient httpClient;
     private final Gson gson;
 
-    private @Nullable AmpliPiHandler bridgeHandler;
+    private volatile @Nullable AmpliPiHandler bridgeHandler;
 
     private @Nullable Group groupState;
 
@@ -88,7 +88,7 @@ public class AmpliPiGroupHandler extends BaseThingHandler implements AmpliPiStat
             if (bridge.getStatus() == ThingStatus.ONLINE) {
                 updateStatus(ThingStatus.ONLINE);
             } else {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
+                updateStatus(ThingStatusDetail.BRIDGE_OFFLINE);
             }
         } else {
             throw new IllegalStateException("Bridge must not be null here!");
@@ -148,14 +148,26 @@ public class AmpliPiGroupHandler extends BaseThingHandler implements AmpliPiStat
                     updateStatus(ThingStatus.ONLINE);
                 }
             } catch (InterruptedException | TimeoutException | ExecutionException e) {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
-                        "AmpliPi request failed: " + e.getMessage());
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR, "AmpliPi request failed: " + e.getMessage());
             }
         }
     }
 
     @Override
+    public void dispose() {
+        AmpliPiHandler localBridgeHandler = bridgeHandler;
+        if (localBridgeHandler != null) {
+            localBridgeHandler.removeStatusChangeListener(this);
+            bridgeHandler = null;
+        }
+        super.dispose();
+    }
+
+    @Override
     public void receive(Status status) {
+        if (bridgeHandler == null) {
+            return;
+        }
         int id = getId(thing);
         Optional<Group> group = status.getGroups().stream().filter(z -> z.getId().equals(id)).findFirst();
         group.ifPresent(this::updateGroupState);

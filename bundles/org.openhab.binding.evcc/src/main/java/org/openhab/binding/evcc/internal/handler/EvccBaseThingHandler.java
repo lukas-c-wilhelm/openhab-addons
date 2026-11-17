@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,6 +52,7 @@ import org.openhab.core.thing.ThingStatusDetail;
 import org.openhab.core.thing.ThingStatusInfo;
 import org.openhab.core.thing.binding.BaseThingHandler;
 import org.openhab.core.thing.binding.builder.ChannelBuilder;
+import org.openhab.core.thing.binding.builder.ThingStatusInfoBuilder;
 import org.openhab.core.thing.type.ChannelType;
 import org.openhab.core.thing.type.ChannelTypeRegistry;
 import org.openhab.core.thing.type.ChannelTypeUID;
@@ -75,6 +77,7 @@ import com.google.gson.JsonPrimitive;
  * The {@link EvccBaseThingHandler} is responsible for building a base class with common methods for the thing handlers
  *
  * @author Marcel Goerentz - Initial contribution
+ * @author Michael Weger - Skip unchanged channel and status updates
  */
 @NonNullByDefault
 public abstract class EvccBaseThingHandler extends BaseThingHandler implements EvccThingLifecycleAware {
@@ -90,6 +93,8 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
     // in EvccThingLifecycleAware for why this must be checked-and-acted-upon atomically by
     // any caller that dispatches updates to this handler from another thread.
     private volatile boolean disposed = false;
+    // Last state sent per channel, so that values evcc reports again unchanged are not re-posted to the event bus.
+    private final Map<ChannelUID, State> lastStates = new ConcurrentHashMap<>();
 
     public EvccBaseThingHandler(Thing thing, ChannelTypeRegistry channelTypeRegistry) {
         super(thing);
@@ -123,17 +128,25 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
     /**
      * Initialize the Thing handler.
      *
-     * Sets status to UNKNOWN and attempts to locate and store the bridge handler.
-     * If bridge is not available or not an EvccBridgeHandler, sets status to OFFLINE.
+     * Sets status to UNKNOWN and stores the bridge handler when available.
      */
     @Override
     public void initialize() {
         disposed = false;
+        lastStates.clear();
+        Bridge bridge = getBridge();
+        if (bridge == null) {
+            logger.debug("Bridge unavailable while initializing Thing: {}", thing.getUID());
+            return;
+        }
         updateStatus(ThingStatus.UNKNOWN);
-        if (getBridge() instanceof Bridge bridge && bridge.getHandler() instanceof EvccBridgeHandler handler) {
+        if (bridge.getHandler() instanceof EvccBridgeHandler handler) {
             bridgeHandler = handler;
+            // initialize() runs again whenever the bridge comes back ONLINE; drop the routes registered before,
+            // otherwise every update would be dispatched once per reconnect.
+            handler.getMessageRouter().unregisterRoutes(this);
         } else {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_UNINITIALIZED);
+            updateStatus(ThingStatus.UNKNOWN);
         }
     }
 
@@ -152,6 +165,55 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
         synchronized (this) {
             disposed = true;
             Optional.ofNullable(bridgeHandler).ifPresent(handler -> handler.unregister(this));
+        }
+        lastStates.clear();
+    }
+
+    @Override
+    public void channelLinked(ChannelUID channelUID) {
+        // A newly linked item has no state yet, so it must receive the next value even if unchanged.
+        forgetLastState(channelUID);
+        super.channelLinked(channelUID);
+    }
+
+    @Override
+    public void channelUnlinked(ChannelUID channelUID) {
+        forgetLastState(channelUID);
+        super.channelUnlinked(channelUID);
+    }
+
+    @Override
+    protected void updateState(ChannelUID channelUID, State state) {
+        lastStates.put(channelUID, state);
+        super.updateState(channelUID, state);
+    }
+
+    /**
+     * Update the channel state only if it differs from the last state sent for that channel.
+     */
+    protected void updateStateIfChanged(ChannelUID channelUID, State state) {
+        if (!state.equals(lastStates.get(channelUID))) {
+            logger.trace("Updating channel {} to {}", channelUID.getId(), state);
+            updateState(channelUID, state);
+        }
+    }
+
+    /**
+     * Forget the last state sent for a channel, so the next value evcc reports is sent even if unchanged.
+     * <p>
+     * Must be called when a command is received for the channel: the item may have been auto-updated to the
+     * commanded value, so the binding no longer knows the item state.
+     */
+    protected void forgetLastState(ChannelUID channelUID) {
+        lastStates.remove(channelUID);
+    }
+
+    @Override
+    protected void updateStatus(ThingStatus status) {
+        // The framework posts an event for every status update, even an unchanged one, and every websocket
+        // update confirms the ONLINE status.
+        if (!ThingStatusInfoBuilder.create(status).build().equals(getThing().getStatusInfo())) {
+            super.updateStatus(status);
         }
     }
 
@@ -401,7 +463,7 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
             } else if (!excludedFromReset.contains(id)) {
                 // else set channel state to UNDEF if channel is linked
                 if (isLinked(uid)) {
-                    updateState(uid, UnDefType.UNDEF);
+                    updateStateIfChanged(uid, UnDefType.UNDEF);
                 }
             }
         }
@@ -423,7 +485,7 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
     protected void resolveAndUpdateState(ChannelUID channelUID, String key, JsonElement value) {
         State state = StateResolver.getInstance().resolveState(key, value);
         if (null != state) {
-            updateState(channelUID, state);
+            updateStateIfChanged(channelUID, state);
         }
     }
 
@@ -474,13 +536,9 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
             JsonElement value = entry.getValue();
             String thingKey = getThingKey(key);
             ChannelUID channelUID = new ChannelUID(getThing().getUID(), thingKey);
-            logger.trace("Processing update for key '{}' (channel '{}'), checking if linked...", key, thingKey);
             try {
                 if (isLinked(channelUID)) {
-                    logger.trace("Updating linked channel {}", thingKey);
                     resolveAndUpdateState(channelUID, key, value);
-                } else {
-                    logger.trace("Channel {} not linked, skipping update", thingKey);
                 }
             } catch (IllegalStateException e) {
                 logger.debug("Handler disposed while processing channel {}", thingKey);
@@ -524,7 +582,7 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
         Optional.ofNullable(bridgeHandler).ifPresent(handler -> {
             HttpMethod httpMethod = HttpMethod.valueOf(method);
             handler.requestQueue.enqueueRequest(url, httpMethod, payload, this::checkResponse,
-                    error -> updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR));
+                    error -> updateStatus(ThingStatusDetail.COMMUNICATION_ERROR));
         });
     }
 
@@ -554,20 +612,20 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
         try {
             if (!completion.await(6, TimeUnit.SECONDS)) {
                 logger.debug("Timed out reading evcc API response from {}", url);
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR);
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR);
                 return null;
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             logger.debug("Interrupted while reading evcc API response from {}", url, e);
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR);
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR);
             return null;
         }
 
         Exception error = errorRef.get();
         if (error != null) {
             logger.debug("Failed to read evcc API response from {}", url, error);
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR);
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR);
             return null;
         }
         return responseBody.get();
@@ -584,10 +642,13 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
                     if (json.has("error")) {
                         logger.debug("Sending command was unsuccessful, got this error:\n {}",
                                 json.get("error").getAsString());
-                        updateStatus(getThing().getStatus(), ThingStatusDetail.COMMUNICATION_ERROR,
-                                json.get("error").getAsString());
+                        ThingStatus status = getThing().getStatus();
+                        updateStatus(status == ThingStatus.ONLINE || status == ThingStatus.OFFLINE ? status
+                                : ThingStatus.UNKNOWN, json.get("error").getAsString());
                     } else {
-                        updateStatus(getThing().getStatus(), ThingStatusDetail.COMMUNICATION_ERROR);
+                        ThingStatus status = getThing().getStatus();
+                        updateStatus(status == ThingStatus.ONLINE || status == ThingStatus.OFFLINE ? status
+                                : ThingStatus.UNKNOWN);
                         logger.warn("evcc API error: HTTP {}", response.getStatus());
                     }
                 });
@@ -605,10 +666,10 @@ public abstract class EvccBaseThingHandler extends BaseThingHandler implements E
     public void bridgeStatusChanged(ThingStatusInfo statusInfo) {
         switch (statusInfo.getStatus()) {
             case OFFLINE:
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
+                updateStatus(ThingStatusDetail.BRIDGE_OFFLINE);
                 break;
             case UNINITIALIZED:
-                updateStatus(ThingStatus.UNINITIALIZED, ThingStatusDetail.BRIDGE_UNINITIALIZED);
+                updateStatus(ThingStatus.UNKNOWN);
                 break;
             case ONLINE:
                 Bridge bridge = getBridge();

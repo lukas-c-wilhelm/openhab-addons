@@ -32,6 +32,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -63,6 +64,7 @@ import com.google.gson.reflect.TypeToken;
  *
  * @author Jan N. Klug - Initial contribution
  * @author Martin Littkovsky - Fail fast on throttled requests
+ * @author Jens Erat - Response body in failure messages
  */
 @NonNullByDefault
 public class HttpRequestBuilder {
@@ -71,6 +73,8 @@ public class HttpRequestBuilder {
     private static final String AMZN_ERROR_TYPE_HEADER = "x-amzn-ErrorType";
     private static final String THROTTLING_EXCEPTION = "ThrottlingException";
     private static final String NO_REASON_GIVEN = "no reason given";
+    private static final int MAX_ERROR_BODY_LENGTH = 1000;
+    private static final long REQUEST_TIMEOUT_SECONDS = 10;
 
     private final Logger logger = LoggerFactory.getLogger(HttpRequestBuilder.class);
 
@@ -113,6 +117,7 @@ public class HttpRequestBuilder {
 
     private void createRequest(URI uri, RequestParams params, HttpResponseListener responseListener) {
         Request request = httpClient.newRequest(uri).method(params.method());
+        request.timeout(REQUEST_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         request.header(ACCEPT_LANGUAGE, customHeader(params, ACCEPT_LANGUAGE).orElse("en-US"));
         request.header("DNT", "1");
         request.header("Upgrade-Insecure-Requests", "1");
@@ -331,6 +336,18 @@ public class HttpRequestBuilder {
                 : statusReason + " (" + AMZN_ERROR_TYPE_HEADER + ": " + amznErrorType + ")";
     }
 
+    /** Appends a truncated copy of the response body to a failure message so callers can see the server's error. */
+    static String responseBodySuffix(String content) {
+        if (content.isBlank()) {
+            return "";
+        }
+        String body = content.trim();
+        if (body.length() > MAX_ERROR_BODY_LENGTH) {
+            body = body.substring(0, MAX_ERROR_BODY_LENGTH) + "...";
+        }
+        return " body: " + body;
+    }
+
     /** Package-private so that HttpRequestBuilderTest can drive onComplete() directly. */
     class HttpResponseListener extends BufferingResponseListener {
         private static final int MAX_REDIRECTS = 30;
@@ -423,10 +440,11 @@ public class HttpRequestBuilder {
                                 new ConnectionException(abortedMessage(requestUri, failure), failure));
                         return;
                     }
-                    httpResponse.completeExceptionally(new ConnectionException(
-                            requestUri + " failed with code " + responseStatus + ": "
-                                    + buildFailureReason(response.getReason(), amznErrorType),
-                            responseStatus, amznErrorType));
+                    // Include the truncated response body: it is the server's error payload (not our request),
+                    // so it is safe to log and helps diagnose rejected requests. Applies to every non-2xx response.
+                    httpResponse.completeExceptionally(new ConnectionException(requestUri + " failed with code "
+                            + responseStatus + ": " + buildFailureReason(response.getReason(), amznErrorType)
+                            + responseBodySuffix(content), responseStatus, amznErrorType));
                 } else if (failMode == NORMAL) {
                     httpResponse.complete(new HttpResponse(responseStatus, headers, content));
                 } else {

@@ -94,6 +94,7 @@ public class ShellyChannelDefinitions {
     public static final String ITEMT_PERCENT = "Number:Dimensionless"; // 0–100% (battery, humidity)
     public static final String ITEMT_DIMENSIONLESS = "Number:Dimensionless"; // ratios (dB)
     public static final String ITEMT_PRESSURE = "Number:Pressure";
+    public static final String ITEMT_PLAYER = "Player"; // Media playback control (PLAY/PAUSE/NEXT/PREVIOUS)
 
     // shortcuts to avoid line breaks (make code more readable)
     private static final String CHGR_DEVST = CHANNEL_GROUP_DEV_STATUS;
@@ -111,6 +112,8 @@ public class ShellyChannelDefinitions {
     private static final String CHGR_COLOR = CHANNEL_GROUP_COLOR_CONTROL;
     private static final String CHGR_WHITE = CHANNEL_GROUP_WHITE_CONTROL;
     private static final String CHGR_LORA = CHANNEL_GROUP_LORA;
+    private static final String CHGR_DIAG = CHANNEL_GROUP_DIAG;
+    private static final String CHGR_MEDIA = CHANNEL_GROUP_MEDIA;
 
     public static final String PREFIX_GROUP = "group-type." + BINDING_ID + ".";
     public static final String PREFIX_CHANNEL = "channel-type." + BINDING_ID + ".";
@@ -190,6 +193,8 @@ public class ShellyChannelDefinitions {
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_GATEWAY, "gatewayDevice", ITEMT_STRING))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_ITEMP, "system:indoor-temperature", ITEMT_TEMP))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_WAKEUP, "sensorWakeup", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_WAKEUP_PERIOD, "wakeupPeriod", ITEMT_TIME))
+                .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_RESTARTREQ, "restartReq", ITEMT_SWITCH))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_ACCUWATTS, "meterAccuWatts", ITEMT_POWER))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_ACCUMULATEDPOWER, "accumulatedPower", ITEMT_POWER))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_ACCUTOTAL, "meterAccuTotal", ITEMT_ENERGY))
@@ -207,8 +212,25 @@ public class ShellyChannelDefinitions {
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_UPTIME, "uptime", ITEMT_NUMBER))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_HEARTBEAT, "heartBeat", ITEMT_DATETIME))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_UPDATE, "updateAvailable", ITEMT_SWITCH))
+                .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_DEBUG, "deviceDebug", ITEMT_SWITCH))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_CALIBRATED, "calibrated", ITEMT_SWITCH))
                 .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_FIRMWARE, "deviceFirmware", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_RELAY_IN_THERMOSTAT, "relayInThermostat",
+                        ITEMT_SWITCH))
+                .add(new ShellyChannel(m, CHGR_DEVST, CHANNEL_DEVST_SENSOR_IN_THERMOSTAT, "sensorInThermostat",
+                        ITEMT_SWITCH))
+
+                // Diagnostics (Gen2+ only)
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_TOTALMEM, "diagTotalMem", ITEMT_DATA))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_FREEMEM, "diagFreeMem", ITEMT_DATA))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_TOTALFS, "diagTotalFS", ITEMT_DATA))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_FREEFS, "diagFreeFS", ITEMT_DATA))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_RESTARTS, "diagRestarts", ITEMT_NUMBER))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_TIMEOUTERRORS, "diagTimeoutErrors", ITEMT_NUMBER))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_ALARMS, "diagAlarms", ITEMT_NUMBER))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_LASTALARM, "diagLastAlarm", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_PROTOCOLERRORS, "diagProtocolErrors", ITEMT_NUMBER))
+                .add(new ShellyChannel(m, CHGR_DIAG, CHANNEL_DIAG_MAXITEMP, "diagMaxInternalTemp", ITEMT_TEMP))
 
                 // Relay
                 .add(new ShellyChannel(m, CHGR_RELAY, CHANNEL_OUTPUT_NAME, "outputName", ITEMT_STRING))
@@ -402,11 +424,28 @@ public class ShellyChannelDefinitions {
                 .add(new ShellyChannel(m, CHGR_BAT, CHANNEL_SENSOR_CAPACITOR_VOLTAGE, "sensorCapacitorVoltage",
                         ITEMT_VOLT))
 
+                // Battery of an attached external sensor (Gen2 devicepower:1)
+                .add(new ShellyChannel(m, CHGR_SENSOR, CHANNEL_SENSOR_BAT_LEVEL, "system:battery-level", ITEMT_PERCENT))
+                .add(new ShellyChannel(m, CHGR_SENSOR, CHANNEL_SENSOR_BAT_LOW, "system:low-battery", ITEMT_SWITCH))
+
+                // Wall Display Media Player
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_CONTROL, "mediaControl", ITEMT_PLAYER))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_VOLUME, "system:volume", ITEMT_DIMMER))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_TITLE, "mediaTitle", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_ARTIST, "mediaArtist", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_ALBUM, "mediaAlbum", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_TYPE, "mediaContentType", ITEMT_STRING))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_PLAY_MEDIA_ID, "playMediaId", ITEMT_NUMBER))
+                .add(new ShellyChannel(m, CHGR_MEDIA, CHANNEL_MEDIA_PLAY_RADIO_FAV_ID, "playRadioFavId", ITEMT_NUMBER))
+
                 // TRV
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_POSITION, "sensorPosition", ITEMT_DIMMER))
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_MODE, "controlMode", ITEMT_STRING))
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_PROFILE, "controlProfile", ITEMT_STRING))
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_SETTEMP, "targetTemp", ITEMT_TEMP))
+
+                // Wall Display Thermostat (reuses CHGR_CONTROL / CHANNEL_CONTROL_SETTEMP from TRV above)
+                .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_THERMOSTAT_ENABLE, "thermostatEnable", ITEMT_SWITCH))
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_BCONTROL, "boostControl", ITEMT_SWITCH))
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_BTIMER, "boostTimer", ITEMT_TIME))
                 .add(new ShellyChannel(m, CHGR_CONTROL, CHANNEL_CONTROL_SCHEDULE, "controlSchedule", ITEMT_SWITCH))
@@ -483,8 +522,12 @@ public class ShellyChannelDefinitions {
                 hasTemp = false;
             }
             addChannel(thing, add, hasTemp, CHGR_DEVST, CHANNEL_DEVST_ITEMP);
+            addChannel(thing, add, hasTemp && profile.isGen2 && !profile.isBlu, CHGR_DIAG, CHANNEL_DIAG_MAXITEMP);
         }
         addChannel(thing, add, profile.settings.sleepTime != null, CHGR_SENSOR, CHANNEL_SENSOR_SLEEPTIME);
+        addChannel(thing, add, profile.wakeupPeriod > 0 && !profile.isBlu, CHGR_DEVST, CHANNEL_DEVST_WAKEUP_PERIOD);
+        addChannel(thing, add, profile.isGen2 && !profile.isBlu && status.restartRequired != null, CHGR_DEVST,
+                CHANNEL_DEVST_RESTARTREQ);
 
         /*
          * Any multi-meter device (relay, pure meter like ProEM50, or a Gen2 RGBW2 device - Plus RGBW PM or
@@ -510,13 +553,46 @@ public class ShellyChannelDefinitions {
                 profile.status.uptime != null && (!profile.hasBattery || profile.isMotion || profile.isTRV), CHGR_DEVST,
                 CHANNEL_DEVST_UPTIME);
         addChannel(thing, add, true, CHGR_DEVST, CHANNEL_DEVST_HEARTBEAT);
+        addChannel(thing, add, profile.capDebugLog, CHGR_DEVST, CHANNEL_DEVST_DEBUG);
         addChannel(thing, add, profile.settings.ledPowerDisable != null, CHGR_DEVST, CHANNEL_LED_POWER_DISABLE);
         addChannel(thing, add, profile.settings.ledStatusDisable != null, CHGR_DEVST, CHANNEL_LED_STATUS_DISABLE); // WiFi
         addChannel(thing, add, profile.settings.calibrated != null, CHGR_DEVST, CHANNEL_DEVST_CALIBRATED);
+        addChannel(thing, add, status.relayInThermostat != null, CHGR_DEVST, CHANNEL_DEVST_RELAY_IN_THERMOSTAT);
+        addChannel(thing, add, status.sensorInThermostat != null, CHGR_DEVST, CHANNEL_DEVST_SENSOR_IN_THERMOSTAT);
 
         if (!profile.isBlu) { // currently not supported for BLU devices
             addChannel(thing, add, true, CHGR_DEVST, CHANNEL_DEVST_UPDATE);
         }
+        add.putAll(createDiagnosticsChannels(thing, profile, status));
+        return add;
+    }
+
+    /**
+     * Auto-create device utilization/diagnostics channels (Gen2+ only): device-reported utilization fields plus the
+     * binding-computed health stats.
+     *
+     * @return channels to be added to the thing, keyed by channel id
+     */
+    public static Map<String, Channel> createDiagnosticsChannels(final Thing thing, final ShellyDeviceProfile profile,
+            final ShellySettingsStatus status) {
+        Map<String, Channel> add = new LinkedHashMap<>();
+        if (!profile.isGen2 || profile.isBlu) {
+            return add;
+        }
+
+        // The device reports all utilization values together
+        boolean hasUtilization = status.ramTotal != null;
+        addChannel(thing, add, hasUtilization, CHGR_DIAG, CHANNEL_DIAG_TOTALMEM);
+        addChannel(thing, add, hasUtilization, CHGR_DIAG, CHANNEL_DIAG_FREEMEM);
+        addChannel(thing, add, hasUtilization, CHGR_DIAG, CHANNEL_DIAG_TOTALFS);
+        addChannel(thing, add, hasUtilization, CHGR_DIAG, CHANNEL_DIAG_FREEFS);
+
+        // Binding-computed health stats, always tracked once a Gen2+ Thing is initialized
+        addChannel(thing, add, true, CHGR_DIAG, CHANNEL_DIAG_RESTARTS);
+        addChannel(thing, add, true, CHGR_DIAG, CHANNEL_DIAG_TIMEOUTERRORS);
+        addChannel(thing, add, true, CHGR_DIAG, CHANNEL_DIAG_ALARMS);
+        addChannel(thing, add, true, CHGR_DIAG, CHANNEL_DIAG_LASTALARM);
+        addChannel(thing, add, true, CHGR_DIAG, CHANNEL_DIAG_PROTOCOLERRORS);
         return add;
     }
 
@@ -1091,7 +1167,7 @@ public class ShellyChannelDefinitions {
         return createChannel(thing, channelId, group, channelName);
     }
 
-    private static void addChannel(Thing thing, Map<String, Channel> newChannels, boolean supported, String group,
+    public static void addChannel(Thing thing, Map<String, Channel> newChannels, boolean supported, String group,
             String channelName) throws IllegalArgumentException {
         addChannel(thing, newChannels, supported, group, channelName, null);
     }

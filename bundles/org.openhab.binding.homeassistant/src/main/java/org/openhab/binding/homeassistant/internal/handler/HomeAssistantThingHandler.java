@@ -144,13 +144,11 @@ public class HomeAssistantThingHandler extends AbstractMQTTThingHandler
 
         config = getConfigAs(HandlerConfiguration.class);
         if (config.topics.isEmpty()) {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR,
-                    "@text/offline.conf-error.no-component-topics");
+            updateStatus(ThingStatusDetail.CONFIGURATION_ERROR, "@text/offline.conf-error.no-component-topics");
             return;
         }
         if (!validateTopics()) {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR,
-                    "@text/offline.conf-error.only-one-device");
+            updateStatus(ThingStatusDetail.CONFIGURATION_ERROR, "@text/offline.conf-error.only-one-device");
             return;
         }
         discoveryHomeAssistantIDs.addAll(HaID.fromConfig(config));
@@ -241,7 +239,7 @@ public class HomeAssistantThingHandler extends AbstractMQTTThingHandler
                         .reduce(CompletableFuture.completedFuture(null), (a, v) -> a.thenCompose(b -> v)) // reduce to
                                                                                                           // one
                         .exceptionally(e -> {
-                            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR, e.getMessage());
+                            updateStatus(ThingStatusDetail.CONFIGURATION_ERROR, e.getMessage());
                             return null;
                         }));
 
@@ -425,9 +423,9 @@ public class HomeAssistantThingHandler extends AbstractMQTTThingHandler
     @Override
     protected void updateThingStatus(boolean messageReceived, Optional<Boolean> availabilityTopicsSeen) {
         if (availabilityTopicsSeen.orElse(messageReceived)) {
-            updateStatus(ThingStatus.ONLINE, ThingStatusDetail.NONE);
+            updateStatus(ThingStatus.ONLINE);
         } else {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.NONE);
+            updateStatus(ThingStatus.OFFLINE);
         }
     }
 
@@ -459,6 +457,10 @@ public class HomeAssistantThingHandler extends AbstractMQTTThingHandler
             }
             synchronized (haComponents) { // sync whenever discoverComponents is started
                 var sortedComponents = haComponents.values().stream().sorted(COMPONENT_COMPARATOR).toList();
+
+                sortedComponents.stream().flatMap(c -> c.getChannelMap().values().stream()).map(c -> c.getChannelType())
+                        .filter(Objects::nonNull).map(Objects::requireNonNull)
+                        .forEach(channelTypeProvider::putChannelType);
 
                 var channelGroupTypes = sortedComponents.stream().map(c -> c.getChannelGroupType(typeID.getId()))
                         .filter(Objects::nonNull).map(Objects::requireNonNull).toList();
@@ -650,7 +652,7 @@ public class HomeAssistantThingHandler extends AbstractMQTTThingHandler
             haComponents.forEach((id, component) -> {
                 if (component.getChannels().stream().anyMatch(channel -> channel.getUID().equals(channelUID))) {
                     component.start(connection, scheduler, attributeReceiveTimeout).exceptionally(e -> {
-                        updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR, e.getMessage());
+                        updateStatus(ThingStatusDetail.CONFIGURATION_ERROR, e.getMessage());
                         return null;
                     });
                 }

@@ -78,8 +78,9 @@ class VehicleHandlerTest {
     public static final int HVAC_UPDATE_COUNT = 9;
     public static final int POSITIONING_UPDATE_COUNT = 3;
 
+    // 78 instead of 77: the full update also clears the service-distance channel because this vehicle reports days
     private static final int EVENT_STORAGE_COUNT = HVAC_UPDATE_COUNT + POSITIONING_UPDATE_COUNT + ECOSCORE_UPDATE_COUNT
-            + 77;
+            + 78;
 
     private static final String DATE_TIME_FORMAT = "%1$tY-%1$tm-%1$td %1$tH:%1$tM";
 
@@ -179,7 +180,8 @@ class VehicleHandlerTest {
         assertEquals(8, updateListener.getUpdatesForGroup("windows"), "Windows Update Count");
         assertEquals(12, updateListener.getUpdatesForGroup("trip"), "Trip Update Count");
         assertEquals(10, updateListener.getUpdatesForGroup("tires"), "Tire Update Count");
-        assertEquals(6, updateListener.getUpdatesForGroup("service"), "Service Update Count");
+        // 7 updates: the full update also clears the service-distance channel because this vehicle reports days
+        assertEquals(7, updateListener.getUpdatesForGroup("service"), "Service Update Count");
         assertEquals(8, updateListener.getUpdatesForGroup("range"), "Range Update Count");
         assertEquals(POSITIONING_UPDATE_COUNT, updateListener.getUpdatesForGroup("position"), "Position Update Count");
         assertEquals(5, updateListener.getUpdatesForGroup("lock"), "Lock Update Count");
@@ -537,7 +539,8 @@ class VehicleHandlerTest {
         assertEquals(8, updateListener.getUpdatesForGroup("windows"), "Windows Update Count");
         assertEquals(12, updateListener.getUpdatesForGroup("trip"), "Trip Update Count");
         assertEquals(10, updateListener.getUpdatesForGroup("tires"), "Tire Update Count");
-        assertEquals(6, updateListener.getUpdatesForGroup("service"), "Service Update Count");
+        // 7 updates: the full update also clears the service-distance channel because this vehicle reports days
+        assertEquals(7, updateListener.getUpdatesForGroup("service"), "Service Update Count");
         assertEquals(8, updateListener.getUpdatesForGroup("range"), "Range Update Count");
         assertEquals(POSITIONING_UPDATE_COUNT, updateListener.getUpdatesForGroup("position"), "Position Update Count");
         assertEquals(5, updateListener.getUpdatesForGroup("lock"), "Lock Update Count");
@@ -900,5 +903,38 @@ class VehicleHandlerTest {
         vHandler.handleCommand(cuid, QuantityType.valueOf("70 %"));
         assertEquals(70, ahm.getCommand().getInt("max_soc"),
                 "ChargingConfigure command sent instead of ChargeProgramConfigure");
+    }
+
+    @Test
+    public void testForceUpdateDelegatesToAccountHandler() {
+        Thing thingMock = mock(Thing.class);
+        when(thingMock.getThingTypeUID()).thenReturn(Constants.THING_TYPE_BEV);
+        when(thingMock.getUID()).thenReturn(new ThingUID("test", Constants.BEV));
+        when(thingMock.getProperties()).thenReturn(Map.of());
+        VehicleHandler vHandler = new VehicleHandler(thingMock, new LocationProviderMock(),
+                mock(MercedesMeCommandOptionProvider.class), mock(MercedesMeStateOptionProvider.class));
+        VehicleConfiguration vehicleConfig = new VehicleConfiguration();
+        vehicleConfig.vin = "UNIT_TEST_VIN";
+        vHandler.config = vehicleConfig;
+        AccountHandler accountMock = mock(AccountHandler.class);
+        vHandler.accountHandler = accountMock;
+
+        vHandler.forceUpdate();
+
+        verify(accountMock).forceUpdate("UNIT_TEST_VIN");
+    }
+
+    @Test
+    public void testForceUpdateWithoutAccountIsIgnored() {
+        Thing thingMock = mock(Thing.class);
+        when(thingMock.getThingTypeUID()).thenReturn(Constants.THING_TYPE_BEV);
+        when(thingMock.getUID()).thenReturn(new ThingUID("test", Constants.BEV));
+        when(thingMock.getProperties()).thenReturn(Map.of());
+        VehicleHandler vHandler = new VehicleHandler(thingMock, new LocationProviderMock(),
+                mock(MercedesMeCommandOptionProvider.class), mock(MercedesMeStateOptionProvider.class));
+        vHandler.accountHandler = null;
+
+        // no exception means the missing account is ignored instead of breaking the rule
+        vHandler.forceUpdate();
     }
 }

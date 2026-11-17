@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -87,10 +88,13 @@ import org.slf4j.LoggerFactory;
  * Devices are linked to the bridge. All devices and zones go offline if the cloud api access fails.
  *
  * @author Markus Michels - initial contribution
+ * @author Kovacs Istvan - API lifecycle readiness
  */
 @NonNullByDefault
 public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
     private static final Duration SMART_HOSE_REFRESH_INTERVAL = Duration.ofMinutes(15);
+    private static final long INITIALIZATION_RETRY_SECONDS = 30;
+    private static final long MAX_INITIALIZATION_RETRY_SECONDS = 300;
 
     private final Logger logger = LoggerFactory.getLogger(RachioBridgeHandler.class);
     private final Object lifecycleLock = new Object();
@@ -106,6 +110,8 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
     private volatile boolean disposed;
     private volatile RachioSmartHoseSnapshot smartHoseSnapshot = RachioSmartHoseSnapshot.EMPTY;
     private long lifecycleGeneration;
+    private boolean apiReady;
+    private long initializationRetrySeconds = INITIALIZATION_RETRY_SECONDS;
 
     public enum RefreshReason {
         SCHEDULED_POLL,
@@ -169,6 +175,8 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
         long generation;
         synchronized (lifecycleLock) {
             disposed = false;
+            apiReady = false;
+            initializationRetrySeconds = INITIALIZATION_RETRY_SECONDS;
             generation = ++lifecycleGeneration;
             thingConfig = configuration;
             smartHoseSnapshot = RachioSmartHoseSnapshot.EMPTY;
@@ -180,36 +188,41 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
 
         String configurationError = validateConfiguration(configuration);
         if (configurationError != null) {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR, configurationError);
+            updateStatus(ThingStatusDetail.CONFIGURATION_ERROR, configurationError);
             return;
         }
 
-        Future<?> job;
+        scheduleBridgeInitialization(generation, configuration, 0);
+    }
+
+    private void scheduleBridgeInitialization(long generation, RachioConfiguration configuration, long delaySeconds) {
         try {
-            job = scheduler.submit(() -> initializeBridge(generation, configuration));
+            synchronized (lifecycleLock) {
+                if (disposed || lifecycleGeneration != generation || apiReady) {
+                    return;
+                }
+                // Publish the future before its task can enter this lifecycle, including a zero-delay first attempt.
+                initializationJob.set(scheduler.schedule(() -> initializeBridge(generation, configuration),
+                        delaySeconds, TimeUnit.SECONDS));
+            }
         } catch (RuntimeException e) {
             if (isLifecycleCurrent(generation)) {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                         i18nText("thing-status.rachio.bridge.schedule-initialization-failed"));
             }
             logger.debug("RachioCloud: Unable to schedule initialization", e);
             return;
         }
-        boolean accepted;
-        synchronized (lifecycleLock) {
-            accepted = !disposed && lifecycleGeneration == generation;
-            if (accepted) {
-                initializationJob.set(job);
-            }
-        }
-        if (!accepted) {
-            job.cancel(true);
-        }
     }
 
     private void initializeBridge(long generation, RachioConfiguration configuration) {
+        if (!isLifecycleCurrent(generation)) {
+            return;
+        }
         String errorMessage = "";
         ThingStatusDetail errorStatusDetail = ThingStatusDetail.COMMUNICATION_ERROR;
+        boolean retryInitialization = false;
+        long minimumRetrySeconds = 0;
 
         try {
             logger.debug("RachioCloud: Connecting to Rachio Cloud");
@@ -225,6 +238,8 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
                     return;
                 }
                 rachioApi = initializedApi;
+                apiReady = true;
+                initializationRetrySeconds = INITIALIZATION_RETRY_SECONDS;
             }
             if (!isLifecycleCurrent(generation)) {
                 return;
@@ -247,18 +262,35 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
         } catch (RachioApiException e) {
             errorMessage = e.toString();
             errorStatusDetail = initializationErrorStatusDetail(e);
+            retryInitialization = errorStatusDetail != ThingStatusDetail.CONFIGURATION_ERROR;
+            if (e instanceof RachioApiThrottledException throttled) {
+                minimumRetrySeconds = Math.max(1, throttled.getSuggestedRetryDelay().toSeconds());
+            } else if (e.getApiResult().isResponseRateLimit() || e.getApiResult().isRateLimitBlocked()) {
+                minimumRetrySeconds = Duration.ofDays(1).toSeconds();
+            }
             if (e.getApiResult().isResponseRateLimit()) {
                 logger.warn("RachioCloud: Account is blocked due to rate limit, wait 24h and retry");
             }
         } catch (UnknownHostException e) {
             errorMessage = "Unknown Host or Internet connection down";
+            retryInitialization = true;
         } catch (RuntimeException e) {
             errorMessage = getString(e.getMessage());
         } finally {
             if (!errorMessage.isEmpty() && isLifecycleCurrent(generation)) {
                 logger.debug("RachioCloud: {}", errorMessage);
-                updateStatus(ThingStatus.OFFLINE, errorStatusDetail,
+                updateStatus(errorStatusDetail,
                         i18nText("thing-status.rachio.bridge.initialization-failed", errorMessage));
+                if (retryInitialization) {
+                    synchronized (lifecycleLock) {
+                        if (!disposed && lifecycleGeneration == generation && !apiReady) {
+                            long delaySeconds = Math.max(initializationRetrySeconds, minimumRetrySeconds);
+                            initializationRetrySeconds = Math.min(MAX_INITIALIZATION_RETRY_SECONDS,
+                                    initializationRetrySeconds * 2);
+                            scheduleBridgeInitialization(generation, configuration, delaySeconds);
+                        }
+                    }
+                }
             }
         }
     }
@@ -362,7 +394,7 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
                         + checkApi.getLastApiResult().rateRemaining + " / " + checkApi.getLastApiResult().rateLimit
                         + "), reset at " + checkApi.getLastApiResult().rateReset;
                 logger.debug("{}", errorCritical);
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                         i18nText("thing-status.rachio.bridge.api-rate-limit-blocked",
                                 checkApi.getLastApiResult().rateRemaining, checkApi.getLastApiResult().rateLimit,
                                 checkApi.getLastApiResult().rateReset)); // shutdown bridge+devices+zones
@@ -425,7 +457,7 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
 
     private void publishCommunicationErrorIfCurrent(@Nullable LifecycleSnapshot lifecycle, String errorMessage) {
         if (lifecycle != null && isLifecycleCurrent(lifecycle.generation(), lifecycle.api())) {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                     i18nText("thing-status.rachio.bridge.refresh-failed", errorMessage));
         }
     }
@@ -550,7 +582,7 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
     @Nullable
     LifecycleSnapshot currentLifecycleSnapshot() {
         synchronized (lifecycleLock) {
-            if (disposed) {
+            if (disposed || !apiReady) {
                 return null;
             }
             return new LifecycleSnapshot(lifecycleGeneration, thingConfig, rachioApi);
@@ -566,14 +598,14 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
     /** Returns whether the supplied generation and API still belong to this live handler. */
     boolean isLifecycleCurrent(long generation, RachioApi api) {
         synchronized (lifecycleLock) {
-            return !disposed && lifecycleGeneration == generation && isSameInstance(rachioApi, api);
+            return !disposed && apiReady && lifecycleGeneration == generation && isSameInstance(rachioApi, api);
         }
     }
 
     /** Publishes coordinator state only while its captured bridge lifecycle remains current. */
     boolean publishWebhookStateIfCurrent(LifecycleSnapshot lifecycle, Runnable publisher) {
         synchronized (lifecycleLock) {
-            if (disposed || lifecycleGeneration != lifecycle.generation()
+            if (disposed || !apiReady || lifecycleGeneration != lifecycle.generation()
                     || !isSameInstance(rachioApi, lifecycle.api())) {
                 return false;
             }
@@ -595,6 +627,7 @@ public class RachioBridgeHandler extends AbstractRachioBridgeHandler {
     private void invalidateLifecycle() {
         synchronized (lifecycleLock) {
             disposed = true;
+            apiReady = false;
             lifecycleGeneration++;
         }
     }

@@ -45,7 +45,11 @@ import org.openhab.binding.rachio.internal.utils.ClientRateLimitManager.RateLimi
 import org.openhab.core.thing.Bridge;
 import org.openhab.core.thing.binding.builder.BridgeBuilder;
 
-/** Tests bridge-level Smart Hose Timer snapshot reconciliation. */
+/**
+ * Tests bridge-level Smart Hose Timer snapshot reconciliation.
+ *
+ * @author Kovacs Istvan - Initial contribution
+ */
 @NonNullByDefault
 @SuppressWarnings("null")
 class RachioSmartHoseSnapshotRefreshTest {
@@ -190,6 +194,7 @@ class RachioSmartHoseSnapshotRefreshTest {
         RachioBridgeHandler handler = new RachioBridgeHandler(bridge, Mockito.mock(HttpClient.class));
         when(api.getPersonId()).thenReturn("");
         setField(handler, "rachioApi", api);
+        setField(handler, "apiReady", true);
         return handler;
     }
 

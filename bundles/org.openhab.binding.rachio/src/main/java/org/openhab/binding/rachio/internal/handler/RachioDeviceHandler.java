@@ -23,6 +23,8 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.Set;
@@ -64,6 +66,7 @@ import org.slf4j.LoggerFactory;
  * sent to one of the device channels.
  *
  * @author Markus Michels - Initial contribution
+ * @author Kovacs Istvan - Webhook and polling state reconciliation
  */
 @NonNullByDefault
 public class RachioDeviceHandler extends AbstractRachioThingHandler {
@@ -74,6 +77,11 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
     private static final long MEDIUM_WEBHOOK_REGISTRATION_RETRY_DELAY_SECONDS = 120;
     private static final long MAX_WEBHOOK_REGISTRATION_RETRY_DELAY_SECONDS = 300;
     private final Logger logger = LoggerFactory.getLogger(RachioDeviceHandler.class);
+    private final Object runStateLock = new Object();
+    private long runStateRevision;
+    private int webhookRunUpdatesInProgress;
+    private long currentScheduleRequestSequence;
+    private long latestCurrentScheduleResponseSequence;
 
     protected volatile @Nullable RachioDevice dev;
     private long lastOptionalEnrichmentSuccessMillis = 0;
@@ -107,7 +115,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
         String configuredDeviceId = getThingConfigurationString(PROPERTY_DEV_ID);
         try {
             if (!initializeCloudHandler()) {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE,
+                updateStatus(ThingStatusDetail.BRIDGE_OFFLINE,
                         i18nText("thing-status.rachio.device.bridge-not-initialized"));
                 return;
             }
@@ -117,7 +125,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
             if (d == null || handler == null) {
                 String errorMessage = buildDeviceResolutionError(configuredDeviceId);
                 logger.debug("{}: {}", thingId, errorMessage);
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.CONFIGURATION_ERROR,
+                updateStatus(ThingStatusDetail.CONFIGURATION_ERROR,
                         buildDeviceResolutionStatusDetail(configuredDeviceId));
                 return;
             }
@@ -135,7 +143,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
             String errorMessage = message != null ? message : e.getClass().getSimpleName();
             logger.warn("{}: Unexpected error while initializing Rachio controller", thingId, e);
             if (isHandlerLifecycleCurrent(generation)) {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                         i18nText("thing-status.rachio.device.initialization-failed", errorMessage));
             }
         }
@@ -158,7 +166,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
             }
             if (!isBridgeOnline()) {
                 logger.debug("{}: Rachio Bridge is offline!", thingId);
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
+                updateStatus(ThingStatusDetail.BRIDGE_OFFLINE);
                 return;
             }
             goOnline(generation);
@@ -179,7 +187,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
             String errorMessage) {
         logger.debug("{}: Rachio controller initialization failed: {}", thingId, errorMessage);
         if (isCurrentDeviceContext(generation, handler, d)) {
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                     i18nText("thing-status.rachio.device.initialization-failed", errorMessage));
         }
     }
@@ -208,6 +216,12 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
     String getBoundControllerId() {
         RachioDevice device = dev;
         return device != null ? device.id : null;
+    }
+
+    @Nullable
+    String getConfiguredControllerId() {
+        String configuredId = getThingConfigurationOrPropertyString(PROPERTY_DEV_ID);
+        return !configuredId.isBlank() ? configuredId : getBoundControllerId();
     }
 
     boolean rebindToCurrentModel(RachioDevice currentDevice, String reason) {
@@ -358,7 +372,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
         } finally {
             if (!errorMessage.isEmpty()) {
                 logger.debug("{}: Rachio controller command failed: {}", thingId, errorMessage);
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR,
                         i18nText("thing-status.rachio.device.command-failed", errorMessage));
             }
         }
@@ -450,8 +464,7 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
         RachioDevice previousDevice = dev;
         if (!rebindToCurrentBridgeModel("cloud catalogue refresh")) {
             dev = null;
-            updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
-                    i18nText("thing-status.rachio.device.not-in-poll"));
+            updateStatus(ThingStatusDetail.COMMUNICATION_ERROR, i18nText("thing-status.rachio.device.not-in-poll"));
         } else if (!isSameInstance(previousDevice, dev)) {
             updateProperties();
             postChannelData();
@@ -499,26 +512,42 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
             return;
         }
 
+        CurrentScheduleRequest request = beginCurrentScheduleRequest();
+        List<RachioZoneHandler.RunStateContext> zoneContexts = captureZoneRunStateContexts(d);
         try {
             RachioCurrentScheduleResponse currentSchedule = handler.getCurrentSchedule(d.id, currentSchedulePurpose);
             if (!isCurrentDeviceContext(generation, handler, d)) {
                 return;
             }
-            long now = currentTimeMillis();
-            if (currentSchedule.isRunning() || !shouldPreserveWebhookRunSummary(d, refreshReason, now)) {
-                d.applyCurrentSchedule(currentSchedule);
-                if (d.currentScheduleRunning) {
-                    applyResolvedScheduleMetadata(d, d.currentScheduleId);
+            boolean idleAccepted = false;
+            synchronized (runStateLock) {
+                if (!isRunStateRevisionCurrent(request.webhookRevision())
+                        || request.sequence() < latestCurrentScheduleResponseSequence) {
+                    logger.debug("{}: Ignoring current schedule response superseded by a newer response or webhook",
+                            thingId);
+                } else {
+                    // A failed newer request does not discard a still-valid successful older response.
+                    latestCurrentScheduleResponseSequence = request.sequence();
+                    if (currentSchedule.isRunning()
+                            || !shouldPreserveWebhookRunSummary(d, refreshReason, currentTimeMillis())) {
+                        d.applyCurrentSchedule(currentSchedule);
+                        if (d.currentScheduleRunning) {
+                            applyResolvedScheduleMetadata(d, d.currentScheduleId);
+                        } else {
+                            d.clearActiveZone();
+                            clearWebhookRunSummaryProtection();
+                            idleAccepted = true;
+                        }
+                    } else {
+                        logger.debug(
+                                "{}: Ignoring non-running REST current schedule for controller '{}' during {} because webhook-derived active run state is protected until {}",
+                                thingId, d.id, refreshReason,
+                                Instant.ofEpochMilli(webhookRunSummaryProtectUntilMillis).toString());
+                    }
                 }
-                if (!currentSchedule.isRunning()) {
-                    d.clearActiveZone();
-                    clearWebhookRunSummaryProtection();
-                }
-            } else {
-                logger.debug(
-                        "{}: Ignoring non-running REST current schedule for controller '{}' during {} because webhook-derived active run state is protected until {}",
-                        thingId, d.id, refreshReason,
-                        Instant.ofEpochMilli(webhookRunSummaryProtectUntilMillis).toString());
+            }
+            if (idleAccepted) {
+                reconcileIdleZoneRunStates(handler, d, generation, request, zoneContexts);
             }
             logger.debug("{}: Loaded current schedule for controller '{}': running={}, id='{}'", thingId, d.id,
                     d.currentScheduleRunning, d.currentScheduleId);
@@ -537,6 +566,54 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
         refreshOptionalEnrichments(handler, d, force, generation);
         if (isCurrentDeviceContext(generation, handler, d)) {
             postChannelData(false);
+        }
+    }
+
+    private List<RachioZoneHandler.RunStateContext> captureZoneRunStateContexts(RachioDevice device) {
+        List<RachioZoneHandler.RunStateContext> contexts = new ArrayList<>();
+        for (RachioZone currentZone : device.getZones().values()) {
+            RachioZoneHandler zoneHandler = currentZone.getThingHandler();
+            if (zoneHandler != null) {
+                RachioZoneHandler.RunStateContext context = zoneHandler.captureRunStateContext(device, currentZone);
+                if (context != null) {
+                    contexts.add(context);
+                }
+            }
+        }
+        return contexts;
+    }
+
+    private void reconcileIdleZoneRunStates(RachioBridgeHandler handler, RachioDevice device, long generation,
+            CurrentScheduleRequest request, List<RachioZoneHandler.RunStateContext> zoneContexts) {
+        for (RachioZoneHandler.RunStateContext context : zoneContexts) {
+            context.handler().reconcileIdleRunState(context,
+                    publisher -> publishIfHandlerLifecycleCurrent(generation, () -> {
+                        synchronized (runStateLock) {
+                            if (isSameInstance(cloudHandler, handler) && isSameInstance(dev, device)
+                                    && isRunStateRevisionCurrent(request.webhookRevision())
+                                    && request.sequence() == latestCurrentScheduleResponseSequence
+                                    && !device.currentScheduleRunning) {
+                                publisher.run();
+                            }
+                        }
+                    }));
+        }
+    }
+
+    private CurrentScheduleRequest beginCurrentScheduleRequest() {
+        synchronized (runStateLock) {
+            // A request begun during a webhook must not overwrite that event once it finishes.
+            return new CurrentScheduleRequest(++currentScheduleRequestSequence,
+                    webhookRunUpdatesInProgress == 0 ? runStateRevision : -1);
+        }
+    }
+
+    private record CurrentScheduleRequest(long sequence, long webhookRevision) {
+    }
+
+    private boolean isRunStateRevisionCurrent(long revision) {
+        synchronized (runStateLock) {
+            return revision >= 0 && revision == runStateRevision && webhookRunUpdatesInProgress == 0;
         }
     }
 
@@ -690,6 +767,25 @@ public class RachioDeviceHandler extends AbstractRachioThingHandler {
     }
 
     public boolean webhookEvent(RachioEventGsonDTO event) {
+        boolean runEvent = "ZONE_STATUS".equals(event.type) || "SCHEDULE_STATUS".equals(event.type);
+        if (runEvent) {
+            synchronized (runStateLock) {
+                runStateRevision++;
+                webhookRunUpdatesInProgress++;
+            }
+        }
+        try {
+            return applyWebhookEvent(event);
+        } finally {
+            if (runEvent) {
+                synchronized (runStateLock) {
+                    webhookRunUpdatesInProgress--;
+                }
+            }
+        }
+    }
+
+    private boolean applyWebhookEvent(RachioEventGsonDTO event) {
         boolean update = true;
         RachioDevice d = dev;
         if (d == null) {

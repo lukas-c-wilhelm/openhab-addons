@@ -12,7 +12,10 @@
  */
 package org.openhab.binding.amplipi.internal;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
@@ -25,6 +28,7 @@ import org.eclipse.jetty.client.api.ContentResponse;
 import org.eclipse.jetty.client.util.StringContentProvider;
 import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.HttpStatus;
+import org.openhab.binding.amplipi.internal.audio.PAAudioSink;
 import org.openhab.binding.amplipi.internal.model.Info;
 import org.openhab.binding.amplipi.internal.model.Status;
 import org.openhab.binding.amplipi.internal.model.Zone;
@@ -39,6 +43,7 @@ import org.openhab.core.thing.Thing;
 import org.openhab.core.thing.ThingStatus;
 import org.openhab.core.thing.ThingStatusDetail;
 import org.openhab.core.thing.binding.BaseThingHandler;
+import org.openhab.core.thing.binding.ThingHandlerService;
 import org.openhab.core.types.Command;
 import org.openhab.core.types.RefreshType;
 import org.slf4j.Logger;
@@ -60,7 +65,7 @@ public class AmpliPiZoneHandler extends BaseThingHandler implements AmpliPiStatu
     private final HttpClient httpClient;
     private final Gson gson;
 
-    private @Nullable AmpliPiHandler bridgeHandler;
+    private volatile @Nullable AmpliPiHandler bridgeHandler;
 
     private @Nullable Zone zoneState;
 
@@ -92,7 +97,7 @@ public class AmpliPiZoneHandler extends BaseThingHandler implements AmpliPiStatu
             if (bridge.getStatus() == ThingStatus.ONLINE) {
                 updateStatus(ThingStatus.ONLINE);
             } else {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.BRIDGE_OFFLINE);
+                updateStatus(ThingStatusDetail.BRIDGE_OFFLINE);
             }
         } else {
             throw new IllegalStateException("Bridge must not be null here!");
@@ -105,6 +110,18 @@ public class AmpliPiZoneHandler extends BaseThingHandler implements AmpliPiStatu
 
     private int getVolumeDelta(Thing thing) {
         return Integer.valueOf(thing.getConfiguration().get(AmpliPiBindingConstants.CFG_PARAM_VOLUME_DELTA).toString());
+    }
+
+    @Override
+    public Collection<Class<? extends ThingHandlerService>> getServices() {
+        if (Boolean.TRUE.equals(thing.getConfiguration().get(AmpliPiBindingConstants.CFG_PARAM_AUDIO_SINK))) {
+            return Set.of(PAAudioSink.class);
+        }
+        return List.of();
+    }
+
+    public @Nullable AmpliPiHandler getBridgeHandler() {
+        return bridgeHandler;
     }
 
     @Override
@@ -188,14 +205,26 @@ public class AmpliPiZoneHandler extends BaseThingHandler implements AmpliPiStatu
                     updateStatus(ThingStatus.ONLINE);
                 }
             } catch (InterruptedException | TimeoutException | ExecutionException e) {
-                updateStatus(ThingStatus.OFFLINE, ThingStatusDetail.COMMUNICATION_ERROR,
-                        "AmpliPi request failed: " + e.getMessage());
+                updateStatus(ThingStatusDetail.COMMUNICATION_ERROR, "AmpliPi request failed: " + e.getMessage());
             }
         }
     }
 
     @Override
+    public void dispose() {
+        AmpliPiHandler localBridgeHandler = bridgeHandler;
+        if (localBridgeHandler != null) {
+            localBridgeHandler.removeStatusChangeListener(this);
+            bridgeHandler = null;
+        }
+        super.dispose();
+    }
+
+    @Override
     public void receive(Status status) {
+        if (bridgeHandler == null) {
+            return;
+        }
         int id = getId(thing);
         supportsVolumeDelta = supportsVolumeDelta(status);
         Optional<Zone> zone = status.getZones().stream().filter(z -> z.getId().equals(id)).findFirst();
