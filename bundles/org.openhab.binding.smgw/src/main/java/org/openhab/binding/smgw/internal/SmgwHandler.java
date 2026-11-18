@@ -102,6 +102,11 @@ public class SmgwHandler extends BaseThingHandler {
     @Override
     public void dispose() {
         cancelRefreshJob();
+        try {
+            httpClient.stop();
+        } catch (Exception e) {
+            logger.warn("Failed to stop http client: {}", e.getMessage());
+        }
     }
 
     private void cancelRefreshJob() {
